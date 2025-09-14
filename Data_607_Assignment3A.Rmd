@@ -1,0 +1,260 @@
+---
+title: "Data 607 Assignment 3A"
+author: "Wendy Romero"
+date: "2025-09-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(DBI)
+library(RPostgres)
+library(dplyr)
+library(tidyverse)
+
+```
+
+## Introduction: Global Baseline Estimate Recommendations
+
+As we saw in the previous assignment working with the Movie Survey Database, the only table with missing data is the ratings table. We are missing ratings as some of the survey takers did not watch every movie in the survey. Instead of deleting the rows that don't contain ratings, this time we will fill in those rows after we create a global baseline estimate system.
+
+We will use the following libraries 
+
+-  The **DBI** library 
+-  The **RPostgres** library  
+-  The **dplyr** library 
+-  The **tidyverse** library 
+
+```{r connect to database}
+con <- dbConnect(RPostgres::Postgres(), 
+                 host="localhost", 
+                 port="5432",
+                 dbname="moviesurvey",
+                 user="postgres", 
+                 password=Sys.getenv("DB_PASSWORD"))
+
+con
+```
+
+## Table Names and Querying our Database
+
+
+```{r tables}
+dbListTables(con)
+
+dbGetQuery(con, "SELECT * FROM movies")
+
+```
+
+
+## Database Tables to R Data Frames
+
+Let's load our database tables into data frames.
+
+
+```{r load data into dataframes}
+df_movies  <- dbGetQuery(con, "SELECT * FROM movies")
+df_takers  <- dbGetQuery(con, "SELECT * FROM survey_takers")
+df_ratings   <- dbGetQuery(con, "SELECT * FROM ratings")
+```
+
+## Glimpse the Data Frames
+
+Let's make sure our data frames were properly loaded.
+
+```{r glimpse data frames}
+glimpse(df_movies)
+glimpse(df_takers)
+glimpse(df_ratings)
+```
+
+## Looking for Null Values 
+
+As in our previous time working with this database and from using glimpse() we know there null values in the tables, let's remind ourselves where they are.
+
+```{r null values}
+sapply(df_ratings, function(x) sum(is.na(x)))
+```
+
+We can see that there are null values in the rating and rating_description columns within the ratings dataframe.
+
+
+### First let's convert our rating column values from character to integer
+
+```{r convert to integer}
+
+df_ratings$rating <- as.integer(df_ratings$rating)
+
+glimpse(df_ratings)
+
+```
+
+## Finding the Average Movie Rating 
+
+Now we can find the average movie rating.
+
+```{r avg movie ratins}
+movie_avg <- df_ratings %>%
+                group_by(film_id) %>%
+                summarise(movieavg = mean(rating, na.rm = TRUE))
+
+movie_avg
+
+glimpse(movie_avg)
+
+```
+
+## Finding the Average Survey Taker Rating 
+
+Now let's find the average rating per survey taker.
+
+```{r avg survey taker rating}
+
+
+taker_avg <- df_ratings %>%
+                group_by(takers_id) %>%
+                summarise(takeravg = mean(rating, na.rm = TRUE))
+
+taker_avg
+
+glimpse(taker_avg)
+```
+
+## Global Mean
+
+First let's find our global mean rating
+
+``` {r global mean}
+global_mean <- mean(df_ratings$rating, na.rm = TRUE)
+```
+
+
+Great, now we can subtract the global mean rating from each movie average rating 
+and add the results as a column to our original ratings data frame. This will give us our movie bias column.
+
+``` {r movie bias}
+movie_avg$mavg_minus_mean <- movie_avg$movieavg - global_mean
+```
+
+
+Let's subtract the global mean rating from each survey taker average rating, this will give us our survey taker bias column.
+
+``` {r taker bias}
+taker_avg$tavg_minus_mean <- taker_avg$takeravg - global_mean
+```
+
+## Add Bias Columns to Original Data Frame
+
+Let's add our movie bias column to our original ratings data frame.
+
+```{r movie ratings}
+df_ratings <- df_ratings %>%
+  left_join(movie_avg, by = "film_id")
+```
+
+Let's add our survey taker bias column to our original ratings data frame.
+
+```{r survey takers ratings}
+
+df_ratings <- df_ratings %>%
+  left_join(taker_avg, by = "takers_id")
+```
+
+Now let's find the global baseline estimates and add it as column to our data frame.
+```{r global baseline estimates}
+df_ratings <- df_ratings %>% 
+  mutate(global_estimate_baseline =global_mean + 
+           mavg_minus_mean + tavg_minus_mean)
+```
+
+Let's round our global baseline estimates column.
+
+```{r round}
+
+df_ratings$global_estimate_baseline <- round(df_ratings$global_estimate_baseline,
+                                             digits = 1)
+```
+
+Let's also order our data frame by movie and then by survey taker id.
+```{r order}
+df_ratings <- df_ratings[order(df_ratings$film_id,df_ratings$takers_id),]
+```
+
+## Subset our Data Frame
+
+Let's have a table with the original ratings table columns with only the addition of the global_baseline estimates, movie and survey taker bias columns.
+
+First lets save our data frame so far.
+
+```{r save}
+df1 <- df_ratings
+
+#Now we can change up our data frame. 
+
+df_ratings <- df_ratings[, c("rating_id","rating", "film_id", "takers_id",
+                             "rating_description", "mavg_minus_mean", 
+                             "tavg_minus_mean", "global_estimate_baseline")]
+```
+
+
+
+Renaming our columns
+```{r rename}
+df_ratings <- df_ratings %>% 
+                     rename(user_bias = tavg_minus_mean, 
+                     movie_bias = mavg_minus_mean, 
+                     global_be = global_estimate_baseline)
+
+```
+
+## Plot Global Baseline Estimates
+A  plot of films vs their global baseline estimates. 
+
+```{r gbe plot}
+
+ggplot( data = df_ratings, aes(x = film_id , y = global_be, 
+                               color = takers_id )) +
+geom_point() +
+  labs(title = "Film Global Estimates")
+```
+
+## Replace Nulls with Global Estimaes
+
+Let's replace our null ratings with their global estimates and ensure the rating column has no null values.
+
+```{r null ratings replaced}
+df_ratings$rating[is.na(df_ratings$rating)] <- 
+  df_ratings$global_be[is.na(df_ratings$rating)]
+
+print(df_ratings$rating)
+
+```
+
+
+Lets's include the film names in our ratings data frame
+```{r join}
+df_ratings <- df_ratings %>%
+  left_join(select(df_movies, movie_id, title), 
+            by = c("film_id" = "movie_id" ))
+
+```
+
+## Making a Plot of Ratings vs Films
+
+Let's try our plot again but with our updates ratings values vs film
+
+```{r plot ratings and films}
+ggplot( data = df_ratings, aes(x = title , y = rating, 
+                               color = takers_id )) +
+  geom_point() +
+  labs(title = "Movie Survey Ratings",
+       x = "Movies",
+       y = "Ratings")
+
+```
+
+```{r disconnect}
+dbDisconnect(con)
+```
+
+
